@@ -6,7 +6,6 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 
 from utils import (
     load_position_csv,
@@ -14,12 +13,18 @@ from utils import (
     load_dividend_cache,
     save_dividend_cache,
     load_sector_master,
+    load_fundamental_cache,
+    save_fundamental_cache,
+    fetch_all_fundamental_data,
     calc_portfolio_summary,
     calc_with_dividend,
     calc_sector_allocation,
     calc_annual_dividend_total,
+    calc_stock_scores,
     check_ryogakucho_criteria,
     fetch_all_dividend_yields,
+    classify_investment_style,
+    get_sector,
     fmt_yen,
     fmt_pct,
 )
@@ -42,6 +47,8 @@ if "div_cache" not in st.session_state:
     st.session_state.div_cache = load_dividend_cache()
 if "sector_master" not in st.session_state:
     st.session_state.sector_master = load_sector_master()
+if "fund_cache" not in st.session_state:
+    st.session_state.fund_cache = load_fundamental_cache()
 
 # ------------------------------------------------------------------ #
 # サイドバー
@@ -118,8 +125,12 @@ if st.session_state.df is None:
 df: pd.DataFrame = st.session_state.df.copy()
 div_cache: dict[str, float] = st.session_state.div_cache
 sector_master: dict[str, str] = st.session_state.sector_master
+fund_cache: pd.DataFrame = st.session_state.fund_cache
 
 df = calc_with_dividend(df, div_cache)
+# セクター列を付与（全タブで共用）
+df["sector"] = df["ticker"].apply(lambda t: get_sector(t, sector_master))
+
 summary = calc_portfolio_summary(df)
 sector_df = calc_sector_allocation(df, sector_master)
 annual_div = calc_annual_dividend_total(df)
@@ -129,11 +140,13 @@ portfolio_yield = (annual_div / summary["total_market_value"] * 100) if summary[
 # タブ
 # ------------------------------------------------------------------ #
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 サマリー",
     "📋 銘柄一覧",
     "🥧 セクター分散",
     "💰 配当データ管理",
+    "📉 分散分析",
+    "🔍 銘柄評価",
     "🗂 生データ",
 ])
 
@@ -200,12 +213,8 @@ with tab1:
 
 # ========== Tab2: 銘柄一覧 ========== #
 with tab2:
-    # 表示用DataFrame整形
     display_df = df.copy()
-    from utils import get_sector
-    display_df["セクター"] = display_df["ticker"].apply(
-        lambda t: get_sector(t, sector_master)
-    )
+    display_df["セクター"] = display_df["sector"]
 
     cols_order = {
         "ticker":              "コード",
@@ -225,7 +234,6 @@ with tab2:
         [v for v in cols_order.values() if v in display_df.rename(columns=cols_order).columns]
     ]
 
-    # スタイリング
     def _color_yield(val):
         """配当利回り色分け: 3%未満=赤, 3~5%=緑, 5%超=青"""
         if pd.isna(val):
@@ -259,7 +267,6 @@ with tab2:
 
     st.dataframe(styled, use_container_width=True, hide_index=True, height=600)
 
-    # 統計行
     st.caption(
         f"合計: {len(disp)}銘柄 ｜ "
         f"時価合計: ¥{df['market_value'].sum():,.0f} ｜ "
@@ -273,7 +280,6 @@ with tab3:
     col_chart, col_check = st.columns([3, 2])
 
     with col_chart:
-        # セクター円グラフ
         fig_sector = go.Figure(go.Pie(
             labels=sector_df["sector"],
             values=sector_df["market_value"],
@@ -288,7 +294,6 @@ with tab3:
         )
         st.plotly_chart(fig_sector, use_container_width=True)
 
-        # セクターテーブル
         st.dataframe(
             sector_df.rename(columns={
                 "sector": "セクター",
@@ -326,7 +331,6 @@ with tab4:
     st.subheader("配当利回りデータ")
     st.caption("yfinanceで取得できない場合は手動で編集できます。保存ボタンで反映されます。")
 
-    # 現在のキャッシュをdfと結合して表示
     cache_rows = []
     for _, row in df.iterrows():
         cache_rows.append({
@@ -366,8 +370,324 @@ with tab4:
         st.rerun()
 
 
-# ========== Tab5: 生データ ========== #
+# ========== Tab5: 分散分析 ========== #
 with tab5:
+    st.subheader("ポートフォリオ分散状況")
+
+    # --- 企業別（銘柄別）構成比 ---
+    stock_pie_df = (
+        df.groupby(["ticker", "name"])["market_value"]
+        .sum()
+        .reset_index()
+        .sort_values("market_value", ascending=False)
+    )
+    # 上位15銘柄 + それ以外をまとめる
+    TOP_N = 15
+    if len(stock_pie_df) > TOP_N:
+        top = stock_pie_df.iloc[:TOP_N].copy()
+        others_mv = stock_pie_df.iloc[TOP_N:]["market_value"].sum()
+        others_count = len(stock_pie_df) - TOP_N
+        others_row = pd.DataFrame([{
+            "ticker": "—",
+            "name": f"その他 ({others_count}銘柄)",
+            "market_value": others_mv,
+        }])
+        stock_pie_df = pd.concat([top, others_row], ignore_index=True)
+
+    fig_stock = go.Figure(go.Pie(
+        labels=stock_pie_df["name"],
+        values=stock_pie_df["market_value"],
+        hovertemplate="<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>",
+        hole=0.35,
+    ))
+    fig_stock.update_layout(
+        title="企業別（銘柄別）構成比",
+        height=420,
+        margin=dict(t=50, b=0, l=0, r=0),
+        legend=dict(font=dict(size=11)),
+    )
+
+    # --- セクター別構成比 ---
+    fig_sector2 = go.Figure(go.Pie(
+        labels=sector_df["sector"],
+        values=sector_df["market_value"],
+        hovertemplate="<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>",
+        hole=0.35,
+    ))
+    fig_sector2.update_layout(
+        title="業種別（セクター別）構成比",
+        height=420,
+        margin=dict(t=50, b=0, l=0, r=0),
+    )
+
+    # --- 投資スタイル別構成比 ---
+    df["投資スタイル"] = df["sector"].apply(classify_investment_style)
+    style_df = (
+        df.groupby("投資スタイル")["market_value"]
+        .sum()
+        .reset_index()
+        .sort_values("market_value", ascending=False)
+    )
+    _STYLE_COLORS = {
+        "ディフェンシブ": "#2ecc71",
+        "景気敏感":       "#e74c3c",
+        "金融":           "#3498db",
+        "REIT・ETF":     "#9b59b6",
+        "その他":         "#95a5a6",
+    }
+    fig_style = go.Figure(go.Pie(
+        labels=style_df["投資スタイル"],
+        values=style_df["market_value"],
+        marker_colors=[_STYLE_COLORS.get(s, "#95a5a6") for s in style_df["投資スタイル"]],
+        hovertemplate="<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>",
+        hole=0.35,
+    ))
+    fig_style.update_layout(
+        title="投資スタイル別構成比（景気敏感 / ディフェンシブ）",
+        height=420,
+        margin=dict(t=50, b=0, l=0, r=0),
+    )
+
+    # --- 通貨・国別構成比 ---
+    def _classify_country(ticker: str, sector: str) -> str:
+        code = int(ticker) if ticker.isdigit() else 0
+        if sector == "REIT・ETF":
+            # 国内REIT・ETF帯（1300-1499）
+            if 1300 <= code <= 1499:
+                return "国内REIT・ETF (JPY)"
+            # 外国株式ETF帯（2500-2800）
+            if 2500 <= code <= 2800:
+                return "外国株式ETF (USD他)"
+        return "国内株式 (JPY)"
+
+    df["通貨・国"] = df.apply(lambda r: _classify_country(r["ticker"], r["sector"]), axis=1)
+    country_df = (
+        df.groupby("通貨・国")["market_value"]
+        .sum()
+        .reset_index()
+        .sort_values("market_value", ascending=False)
+    )
+    fig_country = go.Figure(go.Pie(
+        labels=country_df["通貨・国"],
+        values=country_df["market_value"],
+        hovertemplate="<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>",
+        hole=0.35,
+    ))
+    fig_country.update_layout(
+        title="通貨・国別構成比",
+        height=420,
+        margin=dict(t=50, b=0, l=0, r=0),
+    )
+
+    # 2×2 レイアウト
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.plotly_chart(fig_stock, use_container_width=True)
+    with col_b:
+        st.plotly_chart(fig_sector2, use_container_width=True)
+
+    col_c, col_d = st.columns(2)
+    with col_c:
+        st.plotly_chart(fig_style, use_container_width=True)
+    with col_d:
+        st.plotly_chart(fig_country, use_container_width=True)
+
+    st.caption(
+        "※ 通貨・国別分類は銘柄コード帯による自動推定です。"
+        "海外ETFの判定は主要コード帯のみ対応しており、誤差が含まれる場合があります。"
+    )
+
+
+# ========== Tab6: 銘柄評価 ========== #
+with tab6:
+    st.subheader("銘柄ファンダメンタルズ評価")
+
+    col_fetch, col_info = st.columns([2, 3])
+    with col_fetch:
+        st.markdown("""
+        **取得データ（yfinance）**
+        - ROE / ROA
+        - 有利子負債比率 (D/E)
+        - 流動比率
+        - 配当性向
+        - 売上・利益成長率
+        - PBR / PER / 営業利益率
+        """)
+        if st.button("📥 ファンダメンタルズ一括取得", type="primary", use_container_width=True):
+            tickers = df["ticker"].unique().tolist()
+            bar = st.progress(0, text="取得中...")
+
+            def _fund_progress(done, total):
+                bar.progress(done / total, text=f"取得中... {done}/{total}")
+
+            new_fund = fetch_all_fundamental_data(tickers, progress_callback=_fund_progress)
+            bar.empty()
+            save_fundamental_cache(new_fund)
+            st.session_state.fund_cache = new_fund
+            st.success(f"{len(new_fund)}銘柄のデータを取得しました")
+            st.rerun()
+
+    with col_info:
+        st.markdown("""
+        **評価軸（各100点満点）**
+
+        | 評価軸 | 主な指標 |
+        |--------|---------|
+        | 安全性 | D/E比率・流動比率・ROA |
+        | 成長性 | 売上成長率・利益成長率 |
+        | 収益性 | ROE・営業利益率 |
+        | 株主還元 | 配当利回り・配当性向 |
+        | 割安性 | PBR・PER |
+        """)
+
+    if not fund_cache.empty:
+        # 現在のポートフォリオ銘柄のみを対象にスコア計算
+        current_tickers = set(df["ticker"].unique())
+        filtered_fund = fund_cache[fund_cache["ticker"].isin(current_tickers)]
+        scores_df = calc_stock_scores(filtered_fund, div_cache)
+
+        # 銘柄名・年間配当を結合
+        name_map = dict(zip(df["ticker"], df["name"]))
+        div_by_ticker = df.groupby("ticker")["annual_div_total"].sum().fillna(0).to_dict()
+        scores_df["name"] = scores_df["ticker"].map(name_map).fillna("")
+        scores_df["annual_div"] = scores_df["ticker"].map(div_by_ticker).fillna(0)
+
+        if not scores_df.empty:
+            st.divider()
+
+            # ---- ポートフォリオ全体レーダーチャート ---- #
+            st.subheader("ポートフォリオ全体スコア")
+            weight_mode = st.radio(
+                "集計方法",
+                ["均等加重（単純平均）", "配当金構成比ベース（配当加重）"],
+                horizontal=True,
+            )
+
+            score_cols = ["safety", "growth", "profitability", "shareholder_return", "value"]
+            label_jp = ["安全性", "成長性", "収益性", "株主還元", "割安性"]
+
+            if (
+                weight_mode == "配当金構成比ベース（配当加重）"
+                and scores_df["annual_div"].sum() > 0
+            ):
+                weights = scores_df["annual_div"] / scores_df["annual_div"].sum()
+                portfolio_scores = (
+                    scores_df[score_cols].multiply(weights, axis=0)
+                ).sum().tolist()
+                weight_label = "配当加重平均"
+            else:
+                portfolio_scores = scores_df[score_cols].mean().tolist()
+                weight_label = "単純平均"
+
+            total_portfolio = round(sum(portfolio_scores) / 5, 1)
+
+            fig_radar_port = go.Figure()
+            fig_radar_port.add_trace(go.Scatterpolar(
+                r=portfolio_scores + [portfolio_scores[0]],
+                theta=label_jp + [label_jp[0]],
+                fill="toself",
+                name=f"ポートフォリオ ({weight_label})",
+                line_color="#3498db",
+                fillcolor="rgba(52, 152, 219, 0.25)",
+            ))
+            fig_radar_port.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                height=400,
+                margin=dict(t=30, b=30, l=30, r=30),
+                showlegend=True,
+            )
+
+            col_radar, col_kpi = st.columns([2, 1])
+            with col_radar:
+                st.plotly_chart(fig_radar_port, use_container_width=True)
+            with col_kpi:
+                st.metric("総合スコア", f"{total_portfolio:.1f} / 100")
+                for col, label in zip(score_cols, label_jp):
+                    st.metric(label, f"{scores_df[col].mean():.1f}")
+
+            st.divider()
+
+            # ---- 個別銘柄レーダーチャート ---- #
+            st.subheader("個別銘柄スコア")
+            ticker_options = [
+                f"{r['ticker']}  {r['name']}"
+                for _, r in scores_df.sort_values("total", ascending=False).iterrows()
+            ]
+            selected = st.selectbox("銘柄を選択（総合スコア降順）", ticker_options)
+            selected_ticker = selected.split()[0]
+            sel_row = scores_df[scores_df["ticker"] == selected_ticker].iloc[0]
+            sel_scores = [sel_row[c] for c in score_cols]
+
+            fig_radar_stock = go.Figure()
+            fig_radar_stock.add_trace(go.Scatterpolar(
+                r=portfolio_scores + [portfolio_scores[0]],
+                theta=label_jp + [label_jp[0]],
+                fill="toself",
+                name="ポートフォリオ平均",
+                line_color="#95a5a6",
+                fillcolor="rgba(149, 165, 166, 0.15)",
+            ))
+            fig_radar_stock.add_trace(go.Scatterpolar(
+                r=sel_scores + [sel_scores[0]],
+                theta=label_jp + [label_jp[0]],
+                fill="toself",
+                name=sel_row["name"] or selected_ticker,
+                line_color="#e74c3c",
+                fillcolor="rgba(231, 76, 60, 0.2)",
+            ))
+            fig_radar_stock.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                height=400,
+                margin=dict(t=30, b=30, l=30, r=30),
+                showlegend=True,
+            )
+
+            col_r2, col_detail = st.columns([2, 1])
+            with col_r2:
+                st.plotly_chart(fig_radar_stock, use_container_width=True)
+            with col_detail:
+                st.metric("総合スコア", f"{sel_row['total']:.1f} / 100")
+                for col, label in zip(score_cols, label_jp):
+                    st.metric(label, f"{sel_row[col]:.1f}")
+
+            st.divider()
+
+            # ---- 全銘柄スコアテーブル ---- #
+            st.subheader("全銘柄スコア一覧")
+
+            display_scores = scores_df[["ticker", "name", "total"] + score_cols].copy()
+            display_scores = display_scores.sort_values("total", ascending=False)
+            display_scores.columns = [
+                "コード", "銘柄名", "総合",
+                "安全性", "成長性", "収益性", "株主還元", "割安性",
+            ]
+
+            def _color_score(val):
+                if pd.isna(val):
+                    return ""
+                if val >= 70:
+                    return "background-color: #d5f5e3; color: #1e8449"
+                if val >= 50:
+                    return "background-color: #fef9e7; color: #7d6608"
+                return "background-color: #fadbd8; color: #922b21"
+
+            score_display_cols = ["総合", "安全性", "成長性", "収益性", "株主還元", "割安性"]
+            styled_scores = display_scores.style.map(
+                _color_score, subset=score_display_cols
+            ).format(
+                {col: "{:.1f}" for col in score_display_cols},
+                na_rep="—",
+            )
+
+            st.dataframe(styled_scores, use_container_width=True, hide_index=True, height=500)
+        else:
+            st.warning("現在の保有銘柄に対応するファンダメンタルズデータがありません。再取得してください。")
+    else:
+        st.info("「📥 ファンダメンタルズ一括取得」ボタンを押してデータを取得してください。")
+
+
+# ========== Tab7: 生データ ========== #
+with tab7:
     st.subheader("アップロードCSV（デバッグ用）")
     st.dataframe(df, use_container_width=True, hide_index=True)
     st.caption(f"行数: {len(df)}  ｜  列数: {len(df.columns)}")

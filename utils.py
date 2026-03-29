@@ -16,6 +16,7 @@ import yfinance as yf
 
 DIVIDEND_CACHE_FILE = Path(__file__).parent / "dividend_data.csv"
 SECTOR_MASTER_FILE = Path(__file__).parent / "sector_master.csv"
+FUNDAMENTAL_CACHE_FILE = Path(__file__).parent / "fundamental_data.csv"
 
 # 銘柄コード範囲によるセクター推定テーブル
 _SECTOR_RANGES: list[tuple[str, list[tuple[int, int]]]] = [
@@ -52,6 +53,24 @@ _SECTOR_RANGES: list[tuple[str, list[tuple[int, int]]]] = [
     ("その他金融",    [(8100, 8299), (8400, 8599), (8800, 8899)]),
     ("不動産",        [(8900, 8999)]),
     ("REIT・ETF",     [(1300, 1499), (2550, 2600)]),  # ETF帯域（おおよそ）
+]
+
+# 投資スタイル分類テーブル
+_DEFENSIVE_SECTORS = frozenset({
+    "医薬品", "食品", "電気・ガス", "情報・通信", "水産・農林",
+})
+_CYCLICAL_SECTORS = frozenset({
+    "鉄鋼", "化学", "機械", "電気機器", "輸送用機器", "建設",
+    "非鉄金属", "ゴム", "石油・石炭", "パルプ・紙", "繊維",
+    "ガラス・土石", "金属製品", "鉱業",
+})
+_FINANCIAL_SECTORS = frozenset({"銀行", "証券", "保険", "その他金融"})
+
+# ファンダメンタルズキャッシュの列定義
+_FUND_COLS = [
+    "ticker", "roe", "roa", "debt_to_equity", "current_ratio",
+    "payout_ratio", "revenue_growth", "earnings_growth",
+    "pb_ratio", "pe_ratio", "operating_margin",
 ]
 
 # ------------------------------------------------------------------ #
@@ -194,6 +213,23 @@ def get_sector(ticker_code: str, master: dict[str, str]) -> str:
 
 
 # ------------------------------------------------------------------ #
+# 投資スタイル分類
+# ------------------------------------------------------------------ #
+
+def classify_investment_style(sector: str) -> str:
+    """セクターから投資スタイルを返す（ディフェンシブ/景気敏感/金融/REIT・ETF/その他）"""
+    if sector in _DEFENSIVE_SECTORS:
+        return "ディフェンシブ"
+    if sector in _CYCLICAL_SECTORS:
+        return "景気敏感"
+    if sector in _FINANCIAL_SECTORS:
+        return "金融"
+    if sector == "REIT・ETF":
+        return "REIT・ETF"
+    return "その他"
+
+
+# ------------------------------------------------------------------ #
 # 配当データ
 # ------------------------------------------------------------------ #
 
@@ -225,9 +261,15 @@ def fetch_dividend_yield(ticker_code: str) -> float | None:
     try:
         t = yf.Ticker(symbol)
         info = t.info
-        # info["dividendYield"]が取れれば優先使用
         if info.get("dividendYield"):
-            return round(float(info["dividendYield"]) * 100, 2)
+            yield_val = float(info["dividendYield"])
+            # yfinanceは通常decimal形式（0.0424=4.24%）だが、
+            # 銘柄によっては%形式（4.24）で返す場合がある
+            # → *100 した結果が50%超なら既に%形式と判断して補正
+            result = yield_val * 100
+            if result > 50.0:
+                return round(yield_val, 2) if yield_val <= 50.0 else None
+            return round(result, 2)
         # dividendsの直近1年合計 / 現在株価 で計算
         hist = t.dividends
         if hist.empty:
@@ -236,7 +278,9 @@ def fetch_dividend_yield(ticker_code: str) -> float | None:
         annual = hist[hist.index >= one_year_ago].sum()
         price = info.get("currentPrice") or info.get("regularMarketPrice")
         if price and annual > 0:
-            return round(annual / price * 100, 2)
+            yield_pct = annual / price * 100
+            # 50%超は異常値として除外
+            return round(yield_pct, 2) if yield_pct <= 50.0 else None
     except Exception:
         pass
     return None
@@ -255,6 +299,243 @@ def fetch_all_dividend_yields(
         if progress_callback:
             progress_callback(i + 1, len(tickers))
     return results
+
+
+# ------------------------------------------------------------------ #
+# ファンダメンタルズデータ
+# ------------------------------------------------------------------ #
+
+def fetch_fundamental_data(ticker_code: str) -> dict:
+    """yfinanceで1銘柄のファンダメンタルズ指標を取得する"""
+    symbol = f"{ticker_code.lstrip('0') or ticker_code}.T"
+    result: dict = {"ticker": ticker_code}
+    try:
+        info = yf.Ticker(symbol).info
+        result.update({
+            "roe":              info.get("returnOnEquity"),
+            "roa":              info.get("returnOnAssets"),
+            "debt_to_equity":   info.get("debtToEquity"),
+            "current_ratio":    info.get("currentRatio"),
+            "payout_ratio":     info.get("payoutRatio"),
+            "revenue_growth":   info.get("revenueGrowth"),
+            "earnings_growth":  info.get("earningsGrowth"),
+            "pb_ratio":         info.get("priceToBook"),
+            "pe_ratio":         info.get("forwardPE") or info.get("trailingPE"),
+            "operating_margin": info.get("operatingMargins"),
+        })
+    except Exception:
+        pass
+    return result
+
+
+def load_fundamental_cache() -> pd.DataFrame:
+    """fundamental_data.csv からファンダメンタルズキャッシュを読む"""
+    if not FUNDAMENTAL_CACHE_FILE.exists():
+        return pd.DataFrame(columns=_FUND_COLS)
+    df = pd.read_csv(FUNDAMENTAL_CACHE_FILE, dtype={"ticker": str})
+    df["ticker"] = df["ticker"].str.zfill(4)
+    return df
+
+
+def save_fundamental_cache(df: pd.DataFrame) -> None:
+    """ファンダメンタルズデータを fundamental_data.csv に保存"""
+    df.to_csv(FUNDAMENTAL_CACHE_FILE, index=False)
+
+
+def fetch_all_fundamental_data(
+    tickers: list[str],
+    progress_callback=None,
+) -> pd.DataFrame:
+    """複数銘柄のファンダメンタルズを一括取得"""
+    rows = []
+    for i, t in enumerate(tickers):
+        rows.append(fetch_fundamental_data(t))
+        if progress_callback:
+            progress_callback(i + 1, len(tickers))
+    return pd.DataFrame(rows)
+
+
+# ------------------------------------------------------------------ #
+# スコアリング
+# ------------------------------------------------------------------ #
+
+def _score_safety(row: pd.Series) -> float:
+    """安全性スコア（0-100）: D/E比率・流動比率・ROAで評価"""
+    score = 0.0
+
+    de = row.get("debt_to_equity")
+    if pd.notna(de):
+        if de < 50:    score += 40
+        elif de < 100: score += 28
+        elif de < 200: score += 16
+        else:           score += 5
+    else:
+        score += 20  # データなしは中間値
+
+    cr = row.get("current_ratio")
+    if pd.notna(cr):
+        if cr > 2.0:   score += 30
+        elif cr > 1.5: score += 22
+        elif cr > 1.0: score += 14
+        else:           score += 5
+    else:
+        score += 15
+
+    roa = row.get("roa")
+    if pd.notna(roa):
+        roa_pct = roa * 100
+        if roa_pct > 8:   score += 30
+        elif roa_pct > 5: score += 22
+        elif roa_pct > 2: score += 12
+        else:              score += 0
+    else:
+        score += 15
+
+    return min(score, 100.0)
+
+
+def _score_growth(row: pd.Series) -> float:
+    """成長性スコア（0-100）: 売上・利益成長率で評価"""
+    score = 0.0
+
+    rg = row.get("revenue_growth")
+    if pd.notna(rg):
+        pct = rg * 100
+        if pct > 10:   score += 50
+        elif pct > 5:  score += 35
+        elif pct > 0:  score += 20
+        else:           score += 0
+    else:
+        score += 25
+
+    eg = row.get("earnings_growth")
+    if pd.notna(eg):
+        pct = eg * 100
+        if pct > 10:   score += 50
+        elif pct > 5:  score += 35
+        elif pct > 0:  score += 20
+        else:           score += 0
+    else:
+        score += 25
+
+    return min(score, 100.0)
+
+
+def _score_profitability(row: pd.Series) -> float:
+    """収益性スコア（0-100）: ROE・営業利益率で評価"""
+    score = 0.0
+
+    roe = row.get("roe")
+    if pd.notna(roe):
+        pct = roe * 100
+        if pct > 15:   score += 50
+        elif pct > 10: score += 37
+        elif pct > 5:  score += 22
+        else:           score += 5
+    else:
+        score += 25
+
+    om = row.get("operating_margin")
+    if pd.notna(om):
+        pct = om * 100
+        if pct > 20:   score += 50
+        elif pct > 10: score += 35
+        elif pct > 5:  score += 20
+        else:           score += 5
+    else:
+        score += 25
+
+    return min(score, 100.0)
+
+
+def _score_shareholder_return(row: pd.Series, div_yield: float | None) -> float:
+    """株主還元スコア（0-100）: 配当利回り・配当性向で評価"""
+    score = 0.0
+
+    if div_yield is not None and pd.notna(div_yield):
+        if 3.0 <= div_yield <= 5.0:   score += 60
+        elif 5.0 < div_yield <= 7.0:  score += 45
+        elif 2.0 <= div_yield < 3.0:  score += 38
+        elif 7.0 < div_yield <= 10.0: score += 30
+        elif div_yield > 10.0:         score += 15
+        else:                          score += 10
+    else:
+        score += 30
+
+    pr = row.get("payout_ratio")
+    if pd.notna(pr):
+        pct = pr * 100
+        if 30 <= pct <= 60:   score += 40
+        elif 20 <= pct < 30:  score += 28
+        elif 60 < pct <= 80:  score += 25
+        elif pct > 80:         score += 10
+        else:                  score += 15
+    else:
+        score += 20
+
+    return min(score, 100.0)
+
+
+def _score_value(row: pd.Series) -> float:
+    """割安性スコア（0-100）: PBR・PERで評価"""
+    score = 0.0
+
+    pbr = row.get("pb_ratio")
+    if pd.notna(pbr):
+        if pbr < 1.0:   score += 50
+        elif pbr < 1.5: score += 35
+        elif pbr < 2.0: score += 22
+        elif pbr < 3.0: score += 10
+        else:            score += 0
+    else:
+        score += 25
+
+    per = row.get("pe_ratio")
+    if pd.notna(per) and per > 0:
+        if per < 10:    score += 50
+        elif per < 15:  score += 35
+        elif per < 20:  score += 22
+        elif per < 25:  score += 10
+        else:            score += 0
+    else:
+        score += 25
+
+    return min(score, 100.0)
+
+
+def calc_stock_scores(
+    fund_df: pd.DataFrame,
+    div_cache: dict[str, float],
+) -> pd.DataFrame:
+    """
+    各銘柄の5軸スコアを計算して返す。
+    返却列: ticker, safety, growth, profitability, shareholder_return, value, total
+    """
+    if fund_df.empty:
+        return pd.DataFrame(columns=[
+            "ticker", "safety", "growth", "profitability",
+            "shareholder_return", "value", "total",
+        ])
+    rows = []
+    for _, row in fund_df.iterrows():
+        t = str(row["ticker"])
+        dy = div_cache.get(t)
+        safety  = _score_safety(row)
+        growth  = _score_growth(row)
+        profit  = _score_profitability(row)
+        sr      = _score_shareholder_return(row, dy)
+        value   = _score_value(row)
+        total   = round((safety + growth + profit + sr + value) / 5, 1)
+        rows.append({
+            "ticker":             t,
+            "safety":             round(safety, 1),
+            "growth":             round(growth, 1),
+            "profitability":      round(profit, 1),
+            "shareholder_return": round(sr, 1),
+            "value":              round(value, 1),
+            "total":              total,
+        })
+    return pd.DataFrame(rows)
 
 
 # ------------------------------------------------------------------ #
