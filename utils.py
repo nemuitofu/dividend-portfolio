@@ -160,7 +160,7 @@ def load_monex_csv(file) -> pd.DataFrame:
 def load_rakuten_csv(file) -> pd.DataFrame:
     """
     楽天証券 assetbalance_*.csv を読み込んで正規化済みDataFrameを返す。
-    ヘッダー行: 7行目（1〜6行目は資産情報のためスキップ）
+    ヘッダー行を「銘柄コード」を含む行として動的に検出する。
 
     返却列:
         ticker, name, account_type, current_price,
@@ -168,15 +168,37 @@ def load_rakuten_csv(file) -> pd.DataFrame:
     """
     raw = file.read() if hasattr(file, "read") else Path(file).read_bytes()
 
+    text = None
+    used_enc = None
     for enc in ("cp932", "shift_jis", "utf-8"):
         try:
-            # header=6 で7行目（0-indexed: 6）をヘッダーとして読む
-            df = pd.read_csv(io.BytesIO(raw), encoding=enc, header=6)
+            text = raw.decode(enc)
+            used_enc = enc
             break
-        except (UnicodeDecodeError, pd.errors.ParserError):
+        except UnicodeDecodeError:
             continue
-    else:
+    if text is None:
         raise ValueError("CSVのエンコードを判別できませんでした（cp932/shift_jis/utf-8）")
+
+    # 「銘柄コード」を含む行をヘッダーとして動的に検出する
+    # pandas の skip_blank_lines=True に合わせ、空行を除いた行番号を求める
+    header_row = None
+    non_blank_index = 0
+    for line in text.splitlines():
+        if line.strip() == "":
+            continue  # 空行はpandasが数えない
+        if "銘柄コード" in line:
+            header_row = non_blank_index
+            break
+        non_blank_index += 1
+
+    if header_row is None:
+        raise ValueError("楽天証券CSVのヘッダー行（銘柄コードを含む行）が見つかりませんでした")
+
+    try:
+        df = pd.read_csv(io.BytesIO(raw), encoding=used_enc, header=header_row)
+    except pd.errors.ParserError as e:
+        raise ValueError(f"楽天証券CSV解析エラー: {e}") from e
 
     df.columns = df.columns.str.strip()
 

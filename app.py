@@ -87,9 +87,11 @@ with st.sidebar:
     st.subheader("配当データ管理")
 
     if st.button("🔄 yfinanceで一括取得", use_container_width=True):
-        if st.session_state.df is not None:
-            tickers = st.session_state.df["ticker"].unique().tolist()
-            names = dict(zip(st.session_state.df["ticker"], st.session_state.df["name"]))
+        _all_dfs = [d for d in [st.session_state.df_monex, st.session_state.df_rakuten] if d is not None]
+        if _all_dfs:
+            _combined = pd.concat(_all_dfs, ignore_index=True)
+            tickers = _combined["ticker"].unique().tolist()
+            names = dict(zip(_combined["ticker"], _combined["name"]))
             bar = st.progress(0, text="取得中...")
 
             def _progress(done, total):
