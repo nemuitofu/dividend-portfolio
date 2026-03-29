@@ -8,8 +8,9 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from utils import (
-    load_position_csv,
-    load_balance_csv,
+    load_monex_csv,
+    load_rakuten_csv,
+    combine_positions,
     load_dividend_cache,
     save_dividend_cache,
     load_sector_master,
@@ -39,10 +40,10 @@ st.set_page_config(
 # セッション初期化
 # ------------------------------------------------------------------ #
 
-if "df" not in st.session_state:
-    st.session_state.df = None
-if "balance" not in st.session_state:
-    st.session_state.balance = {}
+if "df_monex" not in st.session_state:
+    st.session_state.df_monex = None
+if "df_rakuten" not in st.session_state:
+    st.session_state.df_rakuten = None
 if "div_cache" not in st.session_state:
     st.session_state.div_cache = load_dividend_cache()
 if "sector_master" not in st.session_state:
@@ -58,28 +59,29 @@ with st.sidebar:
     st.title("📂 データ読み込み")
 
     pos_file = st.file_uploader(
-        "保有株CSV (stockposition_*.csv)",
+        "マネックス証券CSV (stockposition_*.csv)",
         type="csv",
         key="pos_uploader",
     )
     bal_file = st.file_uploader(
-        "資産残高CSV (assetbalance_*.csv)　任意",
+        "楽天証券CSV (assetbalance_*.csv)",
         type="csv",
         key="bal_uploader",
     )
 
     if pos_file:
         try:
-            st.session_state.df = load_position_csv(pos_file)
-            st.success(f"{len(st.session_state.df)}銘柄 読み込み完了")
+            st.session_state.df_monex = load_monex_csv(pos_file)
+            st.success(f"マネックス: {len(st.session_state.df_monex)}銘柄")
         except Exception as e:
-            st.error(f"CSV読み込みエラー: {e}")
+            st.error(f"マネックスCSVエラー: {e}")
 
     if bal_file:
         try:
-            st.session_state.balance = load_balance_csv(bal_file)
+            st.session_state.df_rakuten = load_rakuten_csv(bal_file)
+            st.success(f"楽天証券: {len(st.session_state.df_rakuten)}銘柄")
         except Exception as e:
-            st.error(f"残高CSV読み込みエラー: {e}")
+            st.error(f"楽天証券CSVエラー: {e}")
 
     st.divider()
     st.subheader("配当データ管理")
@@ -111,18 +113,23 @@ with st.sidebar:
 
 st.title("📈 高配当株ポートフォリオマネージャー")
 
-if st.session_state.df is None:
-    st.info("👈 サイドバーからSBI証券の保有株CSVをアップロードしてください。")
+df_combined = combine_positions(st.session_state.df_monex, st.session_state.df_rakuten)
+
+if df_combined.empty:
+    st.info("👈 サイドバーからCSVをアップロードしてください。")
     st.markdown("""
     ### 使い方
-    1. SBI証券 → 口座管理 → 保有証券 → CSVダウンロード（`stockposition_*.csv`）
-    2. サイドバーからアップロード
-    3. 必要に応じて「yfinanceで一括取得」で配当データを取得
+    | ファイル | 証券会社 | ダウンロード場所 |
+    |---------|---------|----------------|
+    | `stockposition_*.csv` | マネックス証券 | ポートフォリオ → 保有証券一覧 → CSV出力 |
+    | `assetbalance_*.csv` | 楽天証券 | 保有証券 → 国内株式 → CSV出力 |
+
+    どちらか一方だけでも利用できます。
     """)
     st.stop()
 
 # データ加工
-df: pd.DataFrame = st.session_state.df.copy()
+df: pd.DataFrame = df_combined
 div_cache: dict[str, float] = st.session_state.div_cache
 sector_master: dict[str, str] = st.session_state.sector_master
 fund_cache: pd.DataFrame = st.session_state.fund_cache

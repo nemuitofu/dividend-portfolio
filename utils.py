@@ -100,17 +100,37 @@ def _read_csv_sjis(file) -> pd.DataFrame:
     raise ValueError("CSVのエンコードを判別できませんでした（cp932/shift_jis/utf-8）")
 
 
-def load_position_csv(file) -> pd.DataFrame:
+def _normalize_positions(df: pd.DataFrame) -> pd.DataFrame:
+    """ポジションDataFrameの数値変換・ticker正規化・損益率計算を共通処理"""
+    for col in ["current_price", "avg_cost", "shares", "market_value", "unrealized_pl"]:
+        if col in df.columns:
+            df[col] = _to_float(df[col])
+
+    # NaN tickerを先に除外してからstr変換（NaN→"nan"化を防ぐ）
+    df = df.dropna(subset=["ticker"])
+    df["ticker"] = df["ticker"].astype(str).str.strip().str.zfill(4)
+    # 4桁数字以外（合計行・ヘッダー残骸等）を除外
+    df = df[df["ticker"].str.match(r"^\d{4}$")]
+
+    df["unrealized_pl_pct"] = (
+        df["unrealized_pl"] / (df["market_value"] - df["unrealized_pl"]) * 100
+    ).round(2)
+
+    return df.dropna(subset=["current_price"])
+
+
+def load_monex_csv(file) -> pd.DataFrame:
     """
-    SBI証券 stockposition_*.csv を読み込んで正規化済みDataFrameを返す。
+    マネックス証券 stockposition_*.csv を読み込んで正規化済みDataFrameを返す。
+    ヘッダー行: 1行目
 
     返却列:
         ticker, name, market, account_type, current_price,
         avg_cost, shares, market_value, unrealized_pl, unrealized_pl_pct
     """
     df = _read_csv_sjis(file)
-    # 列名の空白除去
-    df.columns = df.columns.str.strip()
+    # クォートと空白を除去
+    df.columns = df.columns.str.strip().str.strip('"')
 
     col_map = {
         "銘柄コード":   "ticker",
@@ -125,52 +145,68 @@ def load_position_csv(file) -> pd.DataFrame:
     }
     df = df.rename(columns=col_map)
 
-    # 必要列のみ残す
     keep = list(col_map.values())
     df = df[[c for c in keep if c in df.columns]].copy()
 
-    # 数値変換
-    for col in ["current_price", "avg_cost", "shares", "market_value", "unrealized_pl"]:
-        if col in df.columns:
-            df[col] = _to_float(df[col])
+    # 口座区分にブローカー名を付与（サマリー表示で識別できるように）
+    if "account_type" in df.columns:
+        df["account_type"] = "マネックス証券 " + df["account_type"].fillna("").str.strip()
+    else:
+        df["account_type"] = "マネックス証券"
 
-    # ticker を文字列に統一（ゼロ埋めなし）
-    df["ticker"] = df["ticker"].astype(str).str.strip().str.zfill(4)
-
-    # 評価損益率
-    df["unrealized_pl_pct"] = (
-        df["unrealized_pl"] / (df["market_value"] - df["unrealized_pl"]) * 100
-    ).round(2)
-
-    return df.dropna(subset=["ticker", "current_price"])
+    return _normalize_positions(df)
 
 
-def load_balance_csv(file) -> dict:
+def load_rakuten_csv(file) -> pd.DataFrame:
     """
-    SBI証券 assetbalance(JP)_*.csv を読み込んでサマリーdictを返す。
+    楽天証券 assetbalance_*.csv を読み込んで正規化済みDataFrameを返す。
+    ヘッダー行: 7行目（1〜6行目は資産情報のためスキップ）
+
+    返却列:
+        ticker, name, account_type, current_price,
+        avg_cost, shares, market_value, unrealized_pl, unrealized_pl_pct
     """
     raw = file.read() if hasattr(file, "read") else Path(file).read_bytes()
 
-    summary: dict[str, object] = {}
     for enc in ("cp932", "shift_jis", "utf-8"):
         try:
-            text = raw.decode(enc)
+            # header=6 で7行目（0-indexed: 6）をヘッダーとして読む
+            df = pd.read_csv(io.BytesIO(raw), encoding=enc, header=6)
             break
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, pd.errors.ParserError):
             continue
     else:
-        return summary
+        raise ValueError("CSVのエンコードを判別できませんでした（cp932/shift_jis/utf-8）")
 
-    for line in text.splitlines():
-        parts = [p.strip().strip('"') for p in line.split(",")]
-        if "現在の評価額合計" in parts[0]:
-            val = parts[-1].replace(",", "").replace("¥", "").strip()
-            summary["total_market_value"] = float(val) if val.lstrip("-").isdigit() else None
-        elif "評価損益" in parts[0] and len(parts) >= 3:
-            val = parts[-1].replace(",", "").strip()
-            summary.setdefault("total_unrealized_pl", float(val) if val.lstrip("-").replace(".", "").isdigit() else None)
+    df.columns = df.columns.str.strip()
 
-    return summary
+    # 楽天証券の列名は全角括弧を含む（例: 保有数量［株］）
+    col_map = {
+        "銘柄コード":         "ticker",
+        "銘柄名":             "name",
+        "保有数量［株］":     "shares",
+        "平均取得価額［円］": "avg_cost",
+        "現在値［円］":       "current_price",
+        "時価評価額［円］":   "market_value",
+        "評価損益［円］":     "unrealized_pl",
+    }
+    df = df.rename(columns=col_map)
+
+    keep = list(col_map.values())
+    df = df[[c for c in keep if c in df.columns]].copy()
+
+    # 楽天証券CSVには口座区分列がないため固定値を設定
+    df["account_type"] = "楽天証券"
+
+    return _normalize_positions(df)
+
+
+def combine_positions(*dfs: pd.DataFrame | None) -> pd.DataFrame:
+    """複数証券会社のポジションDataFrameを結合する。Noneや空のものはスキップ。"""
+    non_empty = [d for d in dfs if d is not None and not d.empty]
+    if not non_empty:
+        return pd.DataFrame()
+    return pd.concat(non_empty, ignore_index=True)
 
 
 # ------------------------------------------------------------------ #
