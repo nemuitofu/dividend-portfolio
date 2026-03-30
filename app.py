@@ -84,6 +84,16 @@ with st.sidebar:
             st.error(f"楽天証券CSVエラー: {e}")
 
     st.divider()
+    # 資産マスキングモード（他の人に見せる際に金額を非表示にする）
+    mask = st.checkbox(
+        "👁 資産マスキングモード",
+        value=False,
+        help="ONにすると金額・損益を非表示にします。画面共有時などにご利用ください。",
+    )
+    if mask:
+        st.info("マスキングON: 金額非表示中")
+
+    st.divider()
     st.subheader("配当データ管理")
 
     if st.button("🔄 yfinanceで一括取得", use_container_width=True):
@@ -161,21 +171,23 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 
 # ========== Tab1: サマリー ========== #
 with tab1:
+    _M = "¥ — — —" if mask else None  # マスク時の表示文字列
+
     col1, col2, col3, col4 = st.columns(4)
     col1.metric(
         "総時価評価額",
-        f"¥{summary['total_market_value']:,.0f}",
+        _M or f"¥{summary['total_market_value']:,.0f}",
     )
     col2.metric(
         "総含み損益",
-        fmt_yen(summary["total_unrealized_pl"]),
-        delta=fmt_pct(summary["total_unrealized_pl_pct"]),
+        _M or fmt_yen(summary["total_unrealized_pl"]),
+        delta=None if mask else fmt_pct(summary["total_unrealized_pl_pct"]),
         delta_color="normal",
     )
     col3.metric(
         "年間配当金見込み",
-        f"¥{annual_div:,.0f}",
-        delta=f"月平均 ¥{annual_div/12:,.0f}",
+        _M or f"¥{annual_div:,.0f}",
+        delta=None if mask else f"月平均 ¥{annual_div/12:,.0f}",
         delta_color="off",
     )
     col4.metric(
@@ -193,9 +205,9 @@ with tab1:
     for acct, vals in summary["by_account"].items():
         acct_rows.append({
             "口座": acct,
-            "時価評価額": f"¥{vals['market_value']:,.0f}",
-            "含み損益": fmt_yen(vals["unrealized_pl"]),
-            "含み損益率": fmt_pct(vals["unrealized_pl_pct"]),
+            "時価評価額": "¥ — — —" if mask else f"¥{vals['market_value']:,.0f}",
+            "含み損益": "— — —" if mask else fmt_yen(vals["unrealized_pl"]),
+            "含み損益率": "— — —" if mask else fmt_pct(vals["unrealized_pl_pct"]),
             "比率": f"{vals['ratio']:.1f}%",
         })
     if acct_rows:
@@ -207,10 +219,15 @@ with tab1:
 
     # 口座別円グラフ
     if len(summary["by_account"]) > 1:
+        _hover_acct = (
+            "<b>%{label}</b><br>%{percent}<extra></extra>" if mask
+            else "<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>"
+        )
         fig_acct = go.Figure(go.Pie(
             labels=list(summary["by_account"].keys()),
             values=[v["market_value"] for v in summary["by_account"].values()],
             hole=0.4,
+            hovertemplate=_hover_acct,
         ))
         fig_acct.update_layout(
             title="口座別 時価評価額",
@@ -241,7 +258,7 @@ with tab2:
     }
     disp = display_df.rename(columns=cols_order)[
         [v for v in cols_order.values() if v in display_df.rename(columns=cols_order).columns]
-    ]
+    ].copy()
 
     def _color_yield(val):
         """配当利回り色分け: 3%未満=赤, 3~5%=緑, 5%超=青"""
@@ -259,28 +276,37 @@ with tab2:
             return ""
         return "color: #27ae60" if val >= 0 else "color: #e74c3c"
 
-    styled = disp.style.map(_color_yield, subset=["配当利回り(%)"]).map(
-        _color_pl, subset=["含み損益(円)", "含み損益率(%)"]
-    ).format(
-        {
-            "現在値(円)":      "{:,.1f}",
-            "平均取得(円)":    "{:,.2f}",
-            "時価評価額(円)":  "{:,.0f}",
-            "含み損益(円)":    "{:+,.0f}",
-            "含み損益率(%)":   "{:+.2f}%",
-            "配当利回り(%)":   lambda v: f"{v:.2f}%" if not pd.isna(v) else "—",
-            "年間配当金(円)":  lambda v: f"¥{v:,.0f}" if not pd.isna(v) else "—",
-        },
-        na_rep="—",
-    )
+    if mask:
+        # マスキング時は金額列を文字列置換してからスタイル適用
+        _MASK_STR = "— — —"
+        for col in ["現在値(円)", "平均取得(円)", "時価評価額(円)", "含み損益(円)", "含み損益率(%)", "年間配当金(円)"]:
+            if col in disp.columns:
+                disp[col] = _MASK_STR
+        styled = disp.style.map(_color_yield, subset=["配当利回り(%)"])
+    else:
+        styled = disp.style.map(_color_yield, subset=["配当利回り(%)"]).map(
+            _color_pl, subset=["含み損益(円)", "含み損益率(%)"]
+        ).format(
+            {
+                "現在値(円)":      "{:,.1f}",
+                "平均取得(円)":    "{:,.2f}",
+                "時価評価額(円)":  "{:,.0f}",
+                "含み損益(円)":    "{:+,.0f}",
+                "含み損益率(%)":   "{:+.2f}%",
+                "配当利回り(%)":   lambda v: f"{v:.2f}%" if not pd.isna(v) else "—",
+                "年間配当金(円)":  lambda v: f"¥{v:,.0f}" if not pd.isna(v) else "—",
+            },
+            na_rep="—",
+        )
 
     st.dataframe(styled, use_container_width=True, hide_index=True, height=600)
 
     st.caption(
         f"合計: {len(disp)}銘柄 ｜ "
-        f"時価合計: ¥{df['market_value'].sum():,.0f} ｜ "
-        f"含み損益合計: {fmt_yen(df['unrealized_pl'].sum())} ｜ "
-        f"年間配当合計: ¥{annual_div:,.0f}"
+        + ("時価合計: ¥ — — — ｜ 含み損益合計: — — — ｜ 年間配当合計: ¥ — — —" if mask else
+           f"時価合計: ¥{df['market_value'].sum():,.0f} ｜ "
+           f"含み損益合計: {fmt_yen(df['unrealized_pl'].sum())} ｜ "
+           f"年間配当合計: ¥{annual_div:,.0f}")
     )
 
 
@@ -289,11 +315,15 @@ with tab3:
     col_chart, col_check = st.columns([3, 2])
 
     with col_chart:
+        _hover_sector = (
+            "<b>%{label}</b><br>%{percent}<extra></extra>" if mask
+            else "<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>"
+        )
         fig_sector = go.Figure(go.Pie(
             labels=sector_df["sector"],
             values=sector_df["market_value"],
             text=sector_df["ratio_pct"].apply(lambda v: f"{v:.1f}%"),
-            hovertemplate="<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>",
+            hovertemplate=_hover_sector,
             hole=0.3,
         ))
         fig_sector.update_layout(
@@ -303,18 +333,22 @@ with tab3:
         )
         st.plotly_chart(fig_sector, use_container_width=True)
 
-        st.dataframe(
-            sector_df.rename(columns={
-                "sector": "セクター",
-                "market_value": "時価評価額(円)",
-                "ratio_pct": "比率(%)",
-            }).style.format({
+        _sector_disp = sector_df.rename(columns={
+            "sector": "セクター",
+            "market_value": "時価評価額(円)",
+            "ratio_pct": "比率(%)",
+        }).copy()
+        if mask:
+            _sector_disp["時価評価額(円)"] = "— — —"
+            _sector_style = _sector_disp.style.format({"比率(%)": "{:.1f}%"}).bar(
+                subset=["比率(%)"], color="#4a90d9"
+            )
+        else:
+            _sector_style = _sector_disp.style.format({
                 "時価評価額(円)": "{:,.0f}",
                 "比率(%)": "{:.1f}%",
-            }).bar(subset=["比率(%)"], color="#4a90d9"),
-            use_container_width=True,
-            hide_index=True,
-        )
+            }).bar(subset=["比率(%)"], color="#4a90d9")
+        st.dataframe(_sector_style, use_container_width=True, hide_index=True)
 
     with col_check:
         st.subheader("両学長チェックリスト")
@@ -383,60 +417,15 @@ with tab4:
 with tab5:
     st.subheader("ポートフォリオ分散状況")
 
-    # --- 企業別（銘柄別）構成比 ---
-    stock_pie_df = (
-        df.groupby(["ticker", "name"])["market_value"]
-        .sum()
-        .reset_index()
-        .sort_values("market_value", ascending=False)
-    )
-    # 上位15銘柄 + それ以外をまとめる
-    TOP_N = 15
-    if len(stock_pie_df) > TOP_N:
-        top = stock_pie_df.iloc[:TOP_N].copy()
-        others_mv = stock_pie_df.iloc[TOP_N:]["market_value"].sum()
-        others_count = len(stock_pie_df) - TOP_N
-        others_row = pd.DataFrame([{
-            "ticker": "—",
-            "name": f"その他 ({others_count}銘柄)",
-            "market_value": others_mv,
-        }])
-        stock_pie_df = pd.concat([top, others_row], ignore_index=True)
+    _hover_mv   = "<b>%{label}</b><br>%{percent}<extra></extra>" if mask else "<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>"
+    _hover_div  = "<b>%{label}</b><br>%{percent}<extra></extra>" if mask else "<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>"
+    _PIE_H      = 380
+    _PIE_MARGIN = dict(t=55, b=10, l=10, r=10)
 
-    fig_stock = go.Figure(go.Pie(
-        labels=stock_pie_df["name"],
-        values=stock_pie_df["market_value"],
-        hovertemplate="<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>",
-        hole=0.35,
-    ))
-    fig_stock.update_layout(
-        title="企業別（銘柄別）構成比",
-        height=420,
-        margin=dict(t=50, b=0, l=0, r=0),
-        legend=dict(font=dict(size=11)),
-    )
-
-    # --- セクター別構成比 ---
-    fig_sector2 = go.Figure(go.Pie(
-        labels=sector_df["sector"],
-        values=sector_df["market_value"],
-        hovertemplate="<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>",
-        hole=0.35,
-    ))
-    fig_sector2.update_layout(
-        title="業種別（セクター別）構成比",
-        height=420,
-        margin=dict(t=50, b=0, l=0, r=0),
-    )
-
-    # --- 投資スタイル別構成比 ---
+    # ---- 共通データ ----
+    # 投資スタイル列
     df["投資スタイル"] = df["sector"].apply(classify_investment_style)
-    style_df = (
-        df.groupby("投資スタイル")["market_value"]
-        .sum()
-        .reset_index()
-        .sort_values("market_value", ascending=False)
-    )
+
     _STYLE_COLORS = {
         "ディフェンシブ": "#2ecc71",
         "景気敏感":       "#e74c3c",
@@ -444,67 +433,128 @@ with tab5:
         "REIT・ETF":     "#9b59b6",
         "その他":         "#95a5a6",
     }
-    fig_style = go.Figure(go.Pie(
-        labels=style_df["投資スタイル"],
-        values=style_df["market_value"],
-        marker_colors=[_STYLE_COLORS.get(s, "#95a5a6") for s in style_df["投資スタイル"]],
-        hovertemplate="<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>",
-        hole=0.35,
-    ))
-    fig_style.update_layout(
-        title="投資スタイル別構成比（景気敏感 / ディフェンシブ）",
-        height=420,
-        margin=dict(t=50, b=0, l=0, r=0),
+
+    TOP_N = 15
+
+    # ---- 評価額ベースのデータ ----
+    # 企業別（評価額）
+    mv_stock_df = (
+        df.groupby(["ticker", "name"])["market_value"]
+        .sum().reset_index().sort_values("market_value", ascending=False)
+    )
+    if len(mv_stock_df) > TOP_N:
+        _top = mv_stock_df.iloc[:TOP_N].copy()
+        _others_row = pd.DataFrame([{
+            "ticker": "—", "name": f"その他 ({len(mv_stock_df) - TOP_N}銘柄)",
+            "market_value": mv_stock_df.iloc[TOP_N:]["market_value"].sum(),
+        }])
+        mv_stock_df = pd.concat([_top, _others_row], ignore_index=True)
+
+    # セクター別（評価額）: sector_df 既存
+    # 投資スタイル別（評価額）
+    mv_style_df = (
+        df.groupby("投資スタイル")["market_value"]
+        .sum().reset_index().sort_values("market_value", ascending=False)
     )
 
-    # --- 通貨・国別構成比 ---
-    def _classify_country(ticker: str, sector: str) -> str:
-        code = int(ticker) if ticker.isdigit() else 0
-        if sector == "REIT・ETF":
-            # 国内REIT・ETF帯（1300-1499）
-            if 1300 <= code <= 1499:
-                return "国内REIT・ETF (JPY)"
-            # 外国株式ETF帯（2500-2800）
-            if 2500 <= code <= 2800:
-                return "外国株式ETF (USD他)"
-        return "国内株式 (JPY)"
+    # ---- 配当金ベースのデータ ----
+    _div_df = df[df["annual_div_total"].notna() & (df["annual_div_total"] > 0)].copy()
 
-    df["通貨・国"] = df.apply(lambda r: _classify_country(r["ticker"], r["sector"]), axis=1)
-    country_df = (
-        df.groupby("通貨・国")["market_value"]
-        .sum()
-        .reset_index()
-        .sort_values("market_value", ascending=False)
+    # 企業別（配当金）
+    div_stock_df = (
+        _div_df.groupby(["ticker", "name"])["annual_div_total"]
+        .sum().reset_index().sort_values("annual_div_total", ascending=False)
     )
-    fig_country = go.Figure(go.Pie(
-        labels=country_df["通貨・国"],
-        values=country_df["market_value"],
-        hovertemplate="<b>%{label}</b><br>¥%{value:,.0f}<br>%{percent}<extra></extra>",
-        hole=0.35,
-    ))
-    fig_country.update_layout(
-        title="通貨・国別構成比",
-        height=420,
-        margin=dict(t=50, b=0, l=0, r=0),
+    if len(div_stock_df) > TOP_N:
+        _top_d = div_stock_df.iloc[:TOP_N].copy()
+        _others_d = pd.DataFrame([{
+            "ticker": "—", "name": f"その他 ({len(div_stock_df) - TOP_N}銘柄)",
+            "annual_div_total": div_stock_df.iloc[TOP_N:]["annual_div_total"].sum(),
+        }])
+        div_stock_df = pd.concat([_top_d, _others_d], ignore_index=True)
+
+    # セクター別（配当金）
+    div_sector_df = (
+        _div_df.groupby("sector")["annual_div_total"]
+        .sum().reset_index().sort_values("annual_div_total", ascending=False)
+        .rename(columns={"sector": "sector"})
     )
 
-    # 2×2 レイアウト
-    col_a, col_b = st.columns(2)
+    # 投資スタイル別（配当金）
+    div_style_df = (
+        _div_df.groupby("投資スタイル")["annual_div_total"]
+        .sum().reset_index().sort_values("annual_div_total", ascending=False)
+    )
+
+    # ---- グラフ生成 ----
+    def _pie(labels, values, title, hover, colors=None, **kw):
+        trace_kw = dict(labels=labels, values=values, hovertemplate=hover, hole=0.32)
+        if colors is not None:
+            trace_kw["marker_colors"] = colors
+        fig = go.Figure(go.Pie(**trace_kw))
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=13)),
+            height=_PIE_H, margin=_PIE_MARGIN,
+            legend=dict(font=dict(size=10)),
+            **kw,
+        )
+        return fig
+
+    # 上段: 評価額ベース
+    fig_mv_stock = _pie(
+        mv_stock_df["name"], mv_stock_df["market_value"],
+        "企業別構成比（評価額）", _hover_mv,
+    )
+    fig_mv_sector = _pie(
+        sector_df["sector"], sector_df["market_value"],
+        "業界別構成比（評価額）", _hover_mv,
+    )
+    fig_mv_style = _pie(
+        mv_style_df["投資スタイル"], mv_style_df["market_value"],
+        "景気感応度別構成比（評価額）", _hover_mv,
+        colors=[_STYLE_COLORS.get(s, "#95a5a6") for s in mv_style_df["投資スタイル"]],
+    )
+
+    # 下段: 配当金ベース
+    if _div_df.empty:
+        _no_div_msg = True
+    else:
+        _no_div_msg = False
+        fig_div_stock = _pie(
+            div_stock_df["name"], div_stock_df["annual_div_total"],
+            "企業別構成比（配当金額）", _hover_div,
+        )
+        fig_div_sector = _pie(
+            div_sector_df["sector"], div_sector_df["annual_div_total"],
+            "業界別構成比（配当金額）", _hover_div,
+        )
+        fig_div_style = _pie(
+            div_style_df["投資スタイル"], div_style_df["annual_div_total"],
+            "景気感応度別構成比（配当金額）", _hover_div,
+            colors=[_STYLE_COLORS.get(s, "#95a5a6") for s in div_style_df["投資スタイル"]],
+        )
+
+    # ---- 3×2 レイアウト ----
+    st.caption("上段：評価額ベース　｜　下段：配当金額ベース")
+
+    col_a, col_b, col_c = st.columns(3)
     with col_a:
-        st.plotly_chart(fig_stock, use_container_width=True)
+        st.plotly_chart(fig_mv_stock,  use_container_width=True)
     with col_b:
-        st.plotly_chart(fig_sector2, use_container_width=True)
-
-    col_c, col_d = st.columns(2)
+        st.plotly_chart(fig_mv_sector, use_container_width=True)
     with col_c:
-        st.plotly_chart(fig_style, use_container_width=True)
-    with col_d:
-        st.plotly_chart(fig_country, use_container_width=True)
+        st.plotly_chart(fig_mv_style,  use_container_width=True)
 
-    st.caption(
-        "※ 通貨・国別分類は銘柄コード帯による自動推定です。"
-        "海外ETFの判定は主要コード帯のみ対応しており、誤差が含まれる場合があります。"
-    )
+    if _no_div_msg:
+        st.info("配当金データが未取得のため、下段（配当金ベース）は表示できません。サイドバーの「yfinanceで一括取得」を実行してください。")
+    else:
+        col_d, col_e, col_f = st.columns(3)
+        with col_d:
+            st.plotly_chart(fig_div_stock,  use_container_width=True)
+        with col_e:
+            st.plotly_chart(fig_div_sector, use_container_width=True)
+        with col_f:
+            st.plotly_chart(fig_div_style,  use_container_width=True)
 
 
 # ========== Tab6: 銘柄評価 ========== #
@@ -548,6 +598,75 @@ with tab6:
         | 株主還元 | 配当利回り・配当性向 |
         | 割安性 | PBR・PER |
         """)
+
+    with st.expander("📐 評価スコア計算式・計算例（クリックで展開）"):
+        st.markdown("""
+        ### 評価スコア計算式
+
+        > ⚠️ **データ元**: yfinanceの`info`から取得。**成長率は直近四半期の前年同期比**であり、長期トレンドは反映されません。
+        > （例：商社は商品価格変動で直近四半期が減収でも、長期成長企業の場合があります）
+
+        ---
+        #### 1. 安全性スコア（満点100点）
+
+        | 指標 | 閾値 | 点数 | データなし |
+        |------|------|------|-----------|
+        | D/E比率 | <50 / <100 / <200 / それ以上 | 40 / 28 / 16 / 5 | 20点 |
+        | 流動比率 | >2.0 / >1.5 / >1.0 / それ以下 | 30 / 22 / 14 / 5 | 15点 |
+        | ROA(%) | >8% / >5% / >2% / それ以下 | 30 / 22 / 12 / 0 | 15点 |
+
+        **計算例（伊藤忠商事 8001）**:
+        D/E=120 → 16点、流動比率=1.4 → 14点、ROA=7% → 22点 → **合計52点**
+
+        ---
+        #### 2. 成長性スコア（満点100点）
+
+        | 指標 | 閾値 | 点数 | データなし |
+        |------|------|------|-----------|
+        | 売上成長率(%) | >10 / >5 / >0 / >-5 / それ以下 | 50 / 38 / 25 / 12 / 0 | 25点 |
+        | 利益成長率(%) | >10 / >5 / >0 / >-5 / それ以下 | 50 / 38 / 25 / 12 / 0 | 25点 |
+
+        > **注意**: yfinanceで取得できる成長率は「直近四半期の前年同期比」です。伊藤忠商事のように長期的には増収でも、直近四半期が前年比-3%なら「売上成長率スコア12点」になります。
+
+        **計算例**: 売上成長率=+3% → 25点、利益成長率=-3% → 12点 → **合計37点**
+
+        ---
+        #### 3. 収益性スコア（満点100点）
+
+        | 指標 | 閾値 | 点数 | データなし |
+        |------|------|------|-----------|
+        | ROE(%) | >15 / >10 / >5 / それ以下 | 50 / 37 / 22 / 5 | 25点 |
+        | 営業利益率(%) | >20 / >10 / >5 / それ以下 | 50 / 35 / 20 / 5 | 25点 |
+
+        **計算例**: ROE=20% → 50点、営業利益率=8% → 20点 → **合計70点**
+
+        ---
+        #### 4. 株主還元スコア（満点100点）
+
+        | 指標 | 閾値 | 点数 | データなし |
+        |------|------|------|-----------|
+        | 配当利回り(%) | 3〜5% / 5〜7% / 2〜3% / 7〜10% / >10% / それ以外 | 60 / 45 / 38 / 30 / 15 / 10 | 30点 |
+        | 配当性向(%) | 30〜60% / 20〜30% / 60〜80% / >80% / それ以外 | 40 / 28 / 25 / 10 / 15 | 20点 |
+
+        **計算例**: 配当利回り=3.5% → 60点、配当性向=40% → 40点 → **合計100点**
+
+        ---
+        #### 5. 割安性スコア（満点100点）
+
+        | 指標 | 閾値 | 点数 | データなし |
+        |------|------|------|-----------|
+        | PBR | <1.0 / <1.5 / <2.0 / <3.0 / それ以上 | 50 / 35 / 22 / 10 / 0 | 25点 |
+        | PER | <10 / <15 / <20 / <25 / それ以上 | 50 / 35 / 22 / 10 / 0 | 25点 |
+
+        **計算例**: PBR=1.2 → 35点、PER=12 → 35点 → **合計70点**
+
+        ---
+        #### 総合スコア
+        ```
+        総合スコア = (安全性 + 成長性 + 収益性 + 株主還元 + 割安性) ÷ 5
+        ```
+        """)
+
 
     if not fund_cache.empty:
         # 現在のポートフォリオ銘柄のみを対象にスコア計算
@@ -698,5 +817,7 @@ with tab6:
 # ========== Tab7: 生データ ========== #
 with tab7:
     st.subheader("アップロードCSV（デバッグ用）")
+    if mask:
+        st.warning("⚠️ 資産マスキングモードON中です。このタブには実際の金額データが含まれます。")
     st.dataframe(df, use_container_width=True, hide_index=True)
     st.caption(f"行数: {len(df)}  ｜  列数: {len(df.columns)}")

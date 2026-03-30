@@ -108,7 +108,15 @@ def _normalize_positions(df: pd.DataFrame) -> pd.DataFrame:
 
     # NaN tickerを先に除外してからstr変換（NaN→"nan"化を防ぐ）
     df = df.dropna(subset=["ticker"])
-    df["ticker"] = df["ticker"].astype(str).str.strip().str.zfill(4)
+    # float型（例: 4248.0）→ int → str に変換してから zfill
+    # 楽天CSVはコード列が数値として読まれる場合がある
+    def _ticker_to_str(v) -> str:
+        s = str(v).strip()
+        try:
+            return str(int(float(s)))
+        except (ValueError, OverflowError):
+            return s
+    df["ticker"] = df["ticker"].apply(_ticker_to_str).str.zfill(4)
     # 4桁数字以外（合計行・ヘッダー残骸等）を除外
     df = df[df["ticker"].str.match(r"^\d{4}$")]
 
@@ -453,28 +461,33 @@ def _score_safety(row: pd.Series) -> float:
 
 
 def _score_growth(row: pd.Series) -> float:
-    """成長性スコア（0-100）: 売上・利益成長率で評価"""
+    """
+    成長性スコア（0-100）: 売上・利益成長率で評価
+    ※ yfinanceの revenue_growth / earnings_growth は直近四半期の前年同期比
+    """
     score = 0.0
 
     rg = row.get("revenue_growth")
     if pd.notna(rg):
         pct = rg * 100
-        if pct > 10:   score += 50
-        elif pct > 5:  score += 35
-        elif pct > 0:  score += 20
-        else:           score += 0
+        if pct > 10:    score += 50
+        elif pct > 5:   score += 38
+        elif pct > 0:   score += 25
+        elif pct > -5:  score += 12   # 軽微な減収（-5%以内）
+        else:            score += 0
     else:
-        score += 25
+        score += 25  # データなしは中間値
 
     eg = row.get("earnings_growth")
     if pd.notna(eg):
         pct = eg * 100
-        if pct > 10:   score += 50
-        elif pct > 5:  score += 35
-        elif pct > 0:  score += 20
-        else:           score += 0
+        if pct > 10:    score += 50
+        elif pct > 5:   score += 38
+        elif pct > 0:   score += 25
+        elif pct > -5:  score += 12   # 軽微な減益（-5%以内）
+        else:            score += 0
     else:
-        score += 25
+        score += 25  # データなしは中間値
 
     return min(score, 100.0)
 
