@@ -78,15 +78,16 @@ _FUND_COLS = [
 # ------------------------------------------------------------------ #
 
 def _to_float(series: pd.Series) -> pd.Series:
-    """カンマ区切り・全角数字・"---"などを含む列をfloatに変換"""
-    return (
+    """カンマ区切り・全角数字・"---"などを含む列をfloatに変換。
+    変換できない値は NaN にする（errors="ignore"は文字列が残るため使わない）"""
+    cleaned = (
         series.astype(str)
         .str.replace(",", "", regex=False)
         .str.replace("，", "", regex=False)
         .str.strip()
-        .replace({"---": None, "": None, "nan": None})
-        .astype(float, errors="ignore")
+        .replace({"---": None, "": None, "nan": None, "None": None})
     )
+    return pd.to_numeric(cleaned, errors="coerce")
 
 
 def _read_csv_sjis(file) -> pd.DataFrame:

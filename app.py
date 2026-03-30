@@ -284,19 +284,26 @@ with tab2:
                 disp[col] = _MASK_STR
         styled = disp.style.map(_color_yield, subset=["配当利回り(%)"])
     else:
+        def _fmt_num(fmt: str, prefix: str = ""):
+            """数値なら fmt で整形、そうでなければそのまま返す"""
+            def _f(v):
+                if pd.isna(v) or not isinstance(v, (int, float)):
+                    return "—"
+                return prefix + format(v, fmt)
+            return _f
+
         styled = disp.style.map(_color_yield, subset=["配当利回り(%)"]).map(
             _color_pl, subset=["含み損益(円)", "含み損益率(%)"]
         ).format(
             {
-                "現在値(円)":      "{:,.1f}",
-                "平均取得(円)":    "{:,.2f}",
-                "時価評価額(円)":  "{:,.0f}",
-                "含み損益(円)":    "{:+,.0f}",
-                "含み損益率(%)":   "{:+.2f}%",
-                "配当利回り(%)":   lambda v: f"{v:.2f}%" if not pd.isna(v) else "—",
-                "年間配当金(円)":  lambda v: f"¥{v:,.0f}" if not pd.isna(v) else "—",
+                "現在値(円)":      _fmt_num(",.1f"),
+                "平均取得(円)":    _fmt_num(",.2f"),
+                "時価評価額(円)":  _fmt_num(",.0f"),
+                "含み損益(円)":    lambda v: "—" if pd.isna(v) or not isinstance(v, (int, float)) else f"{v:+,.0f}",
+                "含み損益率(%)":   lambda v: "—" if pd.isna(v) or not isinstance(v, (int, float)) else f"{v:+.2f}%",
+                "配当利回り(%)":   lambda v: "—" if pd.isna(v) or not isinstance(v, (int, float)) else f"{v:.2f}%",
+                "年間配当金(円)":  lambda v: "—" if pd.isna(v) or not isinstance(v, (int, float)) else f"¥{v:,.0f}",
             },
-            na_rep="—",
         )
 
     st.dataframe(styled, use_container_width=True, hide_index=True, height=600)
