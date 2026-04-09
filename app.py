@@ -29,6 +29,8 @@ from utils import (
     fmt_yen,
     fmt_pct,
 )
+from ir_scraper import fetch_all_ir_data, load_all_ir_caches, get_scrape_errors
+from ryogakucho_eval import calc_all_ryogakucho_scores, calc_ryogakucho_scores, FORMULAS
 
 st.set_page_config(
     page_title="高配当株ポートフォリオマネージャー",
@@ -50,6 +52,8 @@ if "sector_master" not in st.session_state:
     st.session_state.sector_master = load_sector_master()
 if "fund_cache" not in st.session_state:
     st.session_state.fund_cache = load_fundamental_cache()
+if "ir_data" not in st.session_state:
+    st.session_state.ir_data = {}
 
 # ------------------------------------------------------------------ #
 # サイドバー
@@ -819,6 +823,396 @@ with tab6:
             st.warning("現在の保有銘柄に対応するファンダメンタルズデータがありません。再取得してください。")
     else:
         st.info("「📥 ファンダメンタルズ一括取得」ボタンを押してデータを取得してください。")
+
+    # ===== 両学長 IRデータ評価セクション ===== #
+    st.divider()
+    st.subheader("📊 両学長 IRデータ評価（過去10年実績ベース）")
+
+    # セッションのIRデータを取得し、キャッシュ済み銘柄を自動ロード
+    ir_data_store: dict = st.session_state.ir_data
+    current_tickers = df["ticker"].unique().tolist()
+    not_yet_loaded = [t for t in current_tickers if t not in ir_data_store]
+    if not_yet_loaded:
+        newly_loaded = load_all_ir_caches(not_yet_loaded)
+        st.session_state.ir_data.update(newly_loaded)
+        ir_data_store = st.session_state.ir_data
+
+    covered_ir_count = sum(
+        1 for t in current_tickers
+        if ir_data_store.get(t, {}).get("results")
+    )
+
+    col_ir_btn, col_ir_desc = st.columns([1, 2])
+    with col_ir_btn:
+        force_refresh_ir = st.checkbox(
+            "強制再取得（キャッシュ無視）",
+            value=False,
+            key="ir_force_refresh",
+        )
+        if st.button(
+            "📥 IRバンクデータ一括取得",
+            type="primary",
+            use_container_width=True,
+            key="ir_fetch_btn",
+        ):
+            n = len(current_tickers)
+            bar_ir = st.progress(0, text="IRバンクから取得中...")
+
+            def _ir_progress(done, total):
+                if total == 0:
+                    return
+                remaining_sec = (total - done) * 2
+                bar_ir.progress(
+                    done / total,
+                    text=f"取得中... {done}/{total}（残り約{remaining_sec}秒）",
+                )
+
+            new_ir = fetch_all_ir_data(
+                current_tickers,
+                force_refresh=force_refresh_ir,
+                progress_callback=_ir_progress,
+            )
+            bar_ir.empty()
+            # セッション状態を更新（st.rerun()なしでそのまま継続）
+            st.session_state.ir_data.update(new_ir)
+            ir_data_store = st.session_state.ir_data
+            covered_ir_count = sum(
+                1 for t in current_tickers
+                if ir_data_store.get(t, {}).get("results")
+            )
+            if covered_ir_count > 0:
+                st.success(
+                    f"✅ {covered_ir_count}/{n}銘柄のIRデータを取得しました"
+                )
+            else:
+                st.error(
+                    f"⚠️ {n}銘柄すべてのIRデータ取得に失敗しました。"
+                    "下の「取得エラー診断」を確認してください。"
+                )
+
+            # エラーがあれば即時表示
+            errors = get_scrape_errors()
+            failed = [t for t in current_tickers if t in errors]
+            success = [t for t in current_tickers if ir_data_store.get(t, {}).get("results")]
+            if failed:
+                with st.expander(
+                    f"⚠️ 取得エラー詳細（{len(failed)}件）",
+                    expanded=(covered_ir_count == 0),
+                ):
+                    st.markdown(f"**成功: {len(success)}件 / 失敗: {len(failed)}件**")
+                    for t in failed[:20]:  # 最大20件表示
+                        name = dict(zip(df["ticker"], df["name"])).get(t, "")
+                        st.markdown(f"- `{t}` {name}: {errors[t]}")
+                    if len(failed) > 20:
+                        st.caption(f"...他 {len(failed)-20}件省略")
+
+        st.caption(f"取得済み: {covered_ir_count} / {len(current_tickers)} 銘柄")
+        if covered_ir_count < len(current_tickers):
+            st.info(f"⏱️ 未取得 {len(current_tickers) - covered_ir_count}銘柄 × 約2秒")
+
+    with col_ir_desc:
+        st.markdown("""
+        **データソース**: IRバンク（irbank.net）
+
+        取得項目（過去10年分以上）:
+        - EPS（一株当たり利益）推移
+        - DPS（一株当たり配当）推移・連続増配年数
+        - 配当性向（%）推移
+        - 自己資本比率（%）推移
+        - 売上高・利益推移（CAGR計算用）
+
+        > yfinanceの「直近四半期比較」とは異なり、**長期トレンドで信頼性を評価**します。
+        """)
+
+    # ---- 取得状況の診断エクスパンダー ---- #
+    errors_now = get_scrape_errors()
+    if errors_now or covered_ir_count < len(current_tickers):
+        with st.expander("🔍 取得エラー診断（クリックで展開）", expanded=False):
+            st.markdown(
+                f"**取得済み: {covered_ir_count} / {len(current_tickers)} 銘柄**"
+            )
+            failed_tickers = [
+                t for t in current_tickers
+                if t in errors_now or not ir_data_store.get(t, {}).get("results")
+            ]
+            if failed_tickers and errors_now:
+                st.markdown("**未取得の原因（直近取得時）:**")
+                for t in failed_tickers[:20]:
+                    name = dict(zip(df["ticker"], df["name"])).get(t, "")
+                    msg = errors_now.get(t, "キャッシュなし・未取得")
+                    st.markdown(f"- `{t}` {name}: {msg}")
+                if len(failed_tickers) > 20:
+                    st.caption(f"...他 {len(failed_tickers)-20}件")
+            elif failed_tickers:
+                st.markdown(
+                    "IRバンクデータ取得ボタンを押してください。"
+                    f"（{len(failed_tickers)}銘柄が未取得）"
+                )
+
+    # ---- 計算式エクスパンダー ---- #
+    with st.expander("📐 両学長スコア計算式（クリックで展開）", expanded=False):
+        st.markdown("""
+        > **評価軸**: 配当継続性 / 配当性向適正 / 財務健全性 / 業績成長性 / 配当利回り適正
+        > の5軸（各0〜100点）の単純平均を総合スコアとします。
+        """)
+        for formula_text in FORMULAS.values():
+            st.markdown(formula_text)
+            st.markdown("---")
+
+    # ---- スコア表示 ---- #
+    if covered_ir_count > 0:
+        rg_scores_df = calc_all_ryogakucho_scores(ir_data_store, div_cache)
+        name_map = dict(zip(df["ticker"], df["name"]))
+        rg_scores_df["name"] = rg_scores_df["ticker"].map(name_map).fillna("")
+
+        # 現在の保有銘柄のみに絞る
+        rg_scores_df = rg_scores_df[
+            rg_scores_df["ticker"].isin(set(current_tickers))
+        ].copy()
+
+        if not rg_scores_df.empty:
+            rg_score_cols = [
+                "dividend_continuity", "payout_ratio_score",
+                "financial_health", "business_growth", "dividend_yield_score",
+            ]
+            rg_label_jp = ["配当継続性", "配当性向適正", "財務健全性", "業績成長性", "配当利回り"]
+
+            st.divider()
+
+            # ---- ポートフォリオ平均レーダー ---- #
+            st.subheader("ポートフォリオ平均スコア（両学長基準）")
+            rg_port_scores = rg_scores_df[rg_score_cols].mean().tolist()
+            rg_total_port = round(sum(rg_port_scores) / 5, 1)
+
+            fig_rg_port = go.Figure()
+            fig_rg_port.add_trace(go.Scatterpolar(
+                r=rg_port_scores + [rg_port_scores[0]],
+                theta=rg_label_jp + [rg_label_jp[0]],
+                fill="toself",
+                name="ポートフォリオ平均",
+                line_color="#27ae60",
+                fillcolor="rgba(39, 174, 96, 0.2)",
+            ))
+            fig_rg_port.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                height=400,
+                margin=dict(t=30, b=30, l=30, r=30),
+                showlegend=True,
+            )
+
+            col_rg_r, col_rg_kpi = st.columns([2, 1])
+            with col_rg_r:
+                st.plotly_chart(fig_rg_port, use_container_width=True)
+            with col_rg_kpi:
+                st.metric("両学長 総合スコア", f"{rg_total_port:.1f} / 100")
+                for col_name, label in zip(rg_score_cols, rg_label_jp):
+                    st.metric(label, f"{rg_scores_df[col_name].mean():.1f}")
+
+            st.divider()
+
+            # ---- 個別銘柄詳細 ---- #
+            st.subheader("個別銘柄 詳細分析")
+            rg_ticker_opts = [
+                f"{r['ticker']}  {r['name']}"
+                for _, r in rg_scores_df.sort_values("total", ascending=False).iterrows()
+            ]
+            sel_rg = st.selectbox(
+                "銘柄を選択（総合スコア降順）",
+                rg_ticker_opts,
+                key="rg_stock_select",
+            )
+            sel_ticker_rg = sel_rg.split()[0]
+            sel_row_rg = rg_scores_df[rg_scores_df["ticker"] == sel_ticker_rg].iloc[0]
+            sel_scores_rg = [sel_row_rg[c] for c in rg_score_cols]
+
+            # 個別銘柄レーダーチャート
+            fig_rg_stock = go.Figure()
+            fig_rg_stock.add_trace(go.Scatterpolar(
+                r=rg_port_scores + [rg_port_scores[0]],
+                theta=rg_label_jp + [rg_label_jp[0]],
+                fill="toself",
+                name="ポートフォリオ平均",
+                line_color="#95a5a6",
+                fillcolor="rgba(149, 165, 166, 0.15)",
+            ))
+            fig_rg_stock.add_trace(go.Scatterpolar(
+                r=sel_scores_rg + [sel_scores_rg[0]],
+                theta=rg_label_jp + [rg_label_jp[0]],
+                fill="toself",
+                name=sel_row_rg["name"] or sel_ticker_rg,
+                line_color="#e67e22",
+                fillcolor="rgba(230, 126, 34, 0.2)",
+            ))
+            fig_rg_stock.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                height=400,
+                margin=dict(t=30, b=30, l=30, r=30),
+                showlegend=True,
+            )
+
+            col_rg2, col_rg_detail = st.columns([2, 1])
+            with col_rg2:
+                st.plotly_chart(fig_rg_stock, use_container_width=True)
+            with col_rg_detail:
+                st.metric("両学長 総合スコア", f"{sel_row_rg['total']:.1f} / 100")
+
+                # スコア内訳（計算根拠の詳細）
+                sel_ir = ir_data_store.get(sel_ticker_rg, {})
+                sel_bd = calc_ryogakucho_scores(
+                    sel_ticker_rg, sel_ir, div_cache.get(sel_ticker_rg)
+                )["breakdown"]
+
+                bd_cont = sel_bd["dividend_continuity"]
+                bd_pay  = sel_bd["payout_ratio"]
+                bd_fin  = sel_bd["financial_health"]
+                bd_grow = sel_bd["business_growth"]
+                bd_yld  = sel_bd["dividend_yield"]
+
+                st.markdown("**スコア内訳**")
+                st.markdown(f"""
+- 配当継続性: **{sel_row_rg['dividend_continuity']:.0f}点**
+  連続{bd_cont.get('consecutive_years', 0)}年維持・カット{bd_cont.get('cut_count', 0)}回
+
+- 配当性向: **{sel_row_rg['payout_ratio_score']:.0f}点**
+  過去5年平均 {bd_pay.get('avg_payout_pct', 'N/A')}%（{bd_pay.get('years_used', 0)}年分）
+
+- 財務健全性: **{sel_row_rg['financial_health']:.0f}点**
+  自己資本比率 {bd_fin.get('avg_equity_ratio', 'N/A')}%
+  EPS黒字率 {bd_fin.get('eps_positive_rate_pct', 'N/A')}%
+
+- 業績成長性: **{sel_row_rg['business_growth']:.0f}点**
+  売上CAGR {bd_grow.get('revenue_cagr_pct', 'N/A')}%
+  EPS CAGR {bd_grow.get('eps_cagr_pct', 'N/A')}%
+
+- 配当利回り: **{sel_row_rg['dividend_yield_score']:.0f}点**
+  現在 {bd_yld.get('div_yield_pct', 'N/A')}%
+""")
+
+            # ---- 歴史的推移チャート ---- #
+            st.subheader(f"{sel_row_rg['name'] or sel_ticker_rg} の長期トレンド")
+            sel_results = ir_data_store.get(sel_ticker_rg, {}).get("results", [])
+
+            if sel_results:
+                trend_df = pd.DataFrame(sel_results)
+                trend_df = trend_df.iloc[::-1].reset_index(drop=True)  # 古→新の順に反転
+
+                col_t1, col_t2 = st.columns(2)
+
+                with col_t1:
+                    # DPS（一株当たり配当）トレンド
+                    if "dps" in trend_df.columns and trend_df["dps"].notna().any():
+                        fig_dps = go.Figure()
+                        fig_dps.add_trace(go.Bar(
+                            x=trend_df["fiscal_year"],
+                            y=trend_df["dps"],
+                            name="DPS（円）",
+                            marker_color="#27ae60",
+                        ))
+                        fig_dps.update_layout(
+                            title="一株当たり配当（DPS）推移",
+                            yaxis_title="円",
+                            height=300,
+                            margin=dict(t=40, b=60, l=50, r=20),
+                        )
+                        st.plotly_chart(fig_dps, use_container_width=True)
+
+                    # 配当性向トレンド
+                    if "payout_ratio" in trend_df.columns and trend_df["payout_ratio"].notna().any():
+                        fig_pr = go.Figure()
+                        fig_pr.add_trace(go.Scatter(
+                            x=trend_df["fiscal_year"],
+                            y=trend_df["payout_ratio"],
+                            mode="lines+markers",
+                            name="配当性向（%）",
+                            line=dict(color="#e67e22", width=2),
+                        ))
+                        fig_pr.add_hline(
+                            y=50, line_dash="dash", line_color="red",
+                            annotation_text="50%（両学長上限目安）",
+                            annotation_position="bottom right",
+                        )
+                        fig_pr.update_layout(
+                            title="配当性向（%）推移",
+                            yaxis_title="%",
+                            height=300,
+                            margin=dict(t=40, b=60, l=50, r=20),
+                        )
+                        st.plotly_chart(fig_pr, use_container_width=True)
+
+                with col_t2:
+                    # EPS（一株当たり利益）トレンド
+                    if "eps" in trend_df.columns and trend_df["eps"].notna().any():
+                        eps_colors = [
+                            "#e74c3c" if (v is not None and v < 0) else "#3498db"
+                            for v in trend_df["eps"]
+                        ]
+                        fig_eps = go.Figure()
+                        fig_eps.add_trace(go.Bar(
+                            x=trend_df["fiscal_year"],
+                            y=trend_df["eps"],
+                            name="EPS（円）",
+                            marker_color=eps_colors,
+                        ))
+                        fig_eps.add_hline(y=0, line_color="black", line_width=1)
+                        fig_eps.update_layout(
+                            title="一株当たり利益（EPS）推移",
+                            yaxis_title="円",
+                            height=300,
+                            margin=dict(t=40, b=60, l=50, r=20),
+                        )
+                        st.plotly_chart(fig_eps, use_container_width=True)
+
+                    # 自己資本比率トレンド
+                    if "equity_ratio" in trend_df.columns and trend_df["equity_ratio"].notna().any():
+                        fig_eq = go.Figure()
+                        fig_eq.add_trace(go.Scatter(
+                            x=trend_df["fiscal_year"],
+                            y=trend_df["equity_ratio"],
+                            mode="lines+markers",
+                            name="自己資本比率（%）",
+                            line=dict(color="#8e44ad", width=2),
+                        ))
+                        fig_eq.add_hline(
+                            y=40, line_dash="dash", line_color="orange",
+                            annotation_text="40%（両学長最低目安）",
+                            annotation_position="bottom right",
+                        )
+                        fig_eq.update_layout(
+                            title="自己資本比率（%）推移",
+                            yaxis_title="%",
+                            height=300,
+                            margin=dict(t=40, b=60, l=50, r=20),
+                        )
+                        st.plotly_chart(fig_eq, use_container_width=True)
+            else:
+                st.info("この銘柄のIRデータがありません。「IRバンクデータ一括取得」を実行してください。")
+
+            st.divider()
+
+            # ---- 全銘柄スコアテーブル ---- #
+            st.subheader("全銘柄 両学長スコア一覧（IRデータベース）")
+
+            disp_rg = rg_scores_df[["ticker", "name", "total"] + rg_score_cols].copy()
+            disp_rg = disp_rg.sort_values("total", ascending=False)
+            disp_rg.columns = [
+                "コード", "銘柄名", "総合",
+                "配当継続性", "配当性向", "財務健全性", "業績成長性", "配当利回り",
+            ]
+
+            rg_disp_score_cols = ["総合", "配当継続性", "配当性向", "財務健全性", "業績成長性", "配当利回り"]
+            styled_rg = disp_rg.style.map(
+                _color_score, subset=rg_disp_score_cols
+            ).format(
+                {col: "{:.1f}" for col in rg_disp_score_cols},
+                na_rep="—",
+            )
+            st.dataframe(styled_rg, use_container_width=True, hide_index=True, height=500)
+
+    else:
+        st.info(
+            "「📥 IRバンクデータ一括取得」ボタンを押してデータを取得してください。"
+            f"  ⏱️ {len(current_tickers)}銘柄 × 約2秒 = 約{len(current_tickers) * 2}秒"
+        )
 
 
 # ========== Tab7: 生データ ========== #
