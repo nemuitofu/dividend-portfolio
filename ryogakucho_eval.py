@@ -127,11 +127,68 @@ CAGR（複利年成長率）= (最新値 ÷ 最古値)^(1 ÷ 年数) - 1
 ```
 """,
 
+    "operating_margin": """
+#### ⑥ 営業利益率スコア（0〜100点）
+
+> 両学長基準：10%以上なら優秀。5%以下は検討の余地なし。
+
+```
+直近3年（データ不足時は利用可能な全期間）の営業利益率平均を使用
+営業利益率 = 営業利益 ÷ 売上高 × 100
+
+avg_margin（%）に応じたスコア:
+  avg_margin ≥ 10% → 100点（両学長の優秀基準）
+  avg_margin ≥  5% →  60点（許容範囲）
+  avg_margin ≥  0% →  30点（低収益・要注意）
+  avg_margin <  0% →   5点（営業赤字）
+  データなし        →  50点（中立）
+```
+
+※ 銀行・商社など営業利益が定義されない業種はデータなし扱い（50点）
+""",
+
+    "operating_cf": """
+#### ⑦ 営業キャッシュフロースコア（0〜100点）
+
+> 両学長基準：毎期黒字であること、長期的に増加傾向であること。
+> 過去10年で1年でも赤字があれば高配当株には推奨しない。
+
+```
+【黒字継続スコア】 最大60点
+  = (営業CF > 0 だった年数 ÷ 総取得年数) × 60点
+  例: 10年中10年黒字 → 60点、10年中8年黒字 → 48点
+
+【CAGR スコア】 最大40点
+  CAGR ≥ 5% → 40点
+  CAGR ≥ 0% → 25点（50の56%）
+  CAGR < 0% → 8点（50の20%に相当）
+  データ不足 → 20点（中立）
+
+営業CFスコア = 黒字継続スコア + CAGRスコア
+```
+""",
+
+    "cash": """
+#### ⑧ 現金等スコア（0〜100点）
+
+> 両学長基準：長期的に見て増加傾向であること（キャッシュリッチな企業を選ぶ）。
+
+```
+現金等のCAGRで評価（取得できた全期間）
+
+CAGR ≥ 5% → 100点
+CAGR ≥ 0% →  65点
+CAGR < 0% →  20点
+データなし  →  50点（中立）
+```
+""",
+
     "total": """
 #### 両学長 総合スコア（0〜100点）
 
 ```
-総合スコア = (配当継続性 + 配当性向適正 + 財務健全性 + 業績成長性 + 配当利回り適正) ÷ 5
+総合スコア = (配当継続性 + 配当性向適正 + 財務健全性 + 業績成長性
+             + 配当利回り適正 + 営業利益率 + 営業CF + 現金等) ÷ 8
 ```
 
 > **データソース**: IRバンク（irbank.net）からスクレイピングした過去実績データ
@@ -369,6 +426,119 @@ def score_business_growth(results: list[dict]) -> tuple[float, dict]:
     return (score, breakdown)
 
 
+def score_operating_margin(results: list[dict]) -> tuple[float, dict]:
+    """
+    営業利益率スコアを計算（0〜100点）。直近3年平均営業利益率を使用。
+    計算式: FORMULAS["operating_margin"] 参照
+
+    Returns:
+        (score, breakdown_dict)
+        breakdown_dict のキー: avg_margin_pct, years_used
+    """
+    margins: list[float] = []
+    for row in results[:3]:  # 直近3年
+        op = row.get("operating_profit")
+        rev = row.get("revenue")
+        if op is not None and rev is not None and rev != 0:
+            margins.append(op / rev * 100)
+
+    if not margins:
+        return (50.0, {"avg_margin_pct": None, "years_used": 0})
+
+    avg_margin = sum(margins) / len(margins)
+
+    if avg_margin >= 10.0:
+        score = 100.0
+    elif avg_margin >= 5.0:
+        score = 60.0
+    elif avg_margin >= 0.0:
+        score = 30.0
+    else:
+        score = 5.0
+
+    return (score, {"avg_margin_pct": round(avg_margin, 1), "years_used": len(margins)})
+
+
+def score_operating_cf(results: list[dict]) -> tuple[float, dict]:
+    """
+    営業キャッシュフロースコアを計算（0〜100点）。
+    黒字継続率 + CAGRで評価。
+    計算式: FORMULAS["operating_cf"] 参照
+
+    Returns:
+        (score, breakdown_dict)
+        breakdown_dict のキー: positive_rate_pct, years_used, cagr_pct
+    """
+    cf_vals = _valid_values(_get_field_series(results, "operating_cf"))
+
+    if not cf_vals:
+        return (50.0, {"positive_rate_pct": None, "years_used": 0, "cagr_pct": None})
+
+    # 黒字継続スコア（max 60点）
+    positive_count = sum(1 for v in cf_vals if v > 0)
+    positive_rate = positive_count / len(cf_vals)
+    positive_score = positive_rate * 60.0
+
+    # CAGRスコア（max 40点）
+    if len(cf_vals) >= 2:
+        # results は新→古順なので cf_vals[0] が最新、cf_vals[-1] が最古
+        cagr = _calc_cagr(cf_vals[-1], cf_vals[0], len(cf_vals) - 1)
+        if cagr is None:
+            cagr_score = 20.0
+            cagr_pct = None
+        elif cagr >= 0.05:
+            cagr_score = 40.0
+            cagr_pct = round(cagr * 100, 2)
+        elif cagr >= 0.0:
+            cagr_score = 25.0
+            cagr_pct = round(cagr * 100, 2)
+        else:
+            cagr_score = 8.0
+            cagr_pct = round(cagr * 100, 2)
+    else:
+        cagr_score = 20.0
+        cagr_pct = None
+
+    score = min(positive_score + cagr_score, 100.0)
+
+    breakdown = {
+        "positive_rate_pct": round(positive_rate * 100, 1),
+        "years_used": len(cf_vals),
+        "cagr_pct": cagr_pct,
+    }
+    return (score, breakdown)
+
+
+def score_cash(results: list[dict]) -> tuple[float, dict]:
+    """
+    現金等スコアを計算（0〜100点）。長期CAGRで評価。
+    計算式: FORMULAS["cash"] 参照
+
+    Returns:
+        (score, breakdown_dict)
+        breakdown_dict のキー: cagr_pct, years_used
+    """
+    cash_vals = _valid_values(_get_field_series(results, "cash"))
+
+    if len(cash_vals) < 2:
+        return (50.0, {"cagr_pct": None, "years_used": len(cash_vals)})
+
+    # results は新→古順なので cash_vals[0] が最新、cash_vals[-1] が最古
+    cagr = _calc_cagr(cash_vals[-1], cash_vals[0], len(cash_vals) - 1)
+
+    if cagr is None:
+        return (50.0, {"cagr_pct": None, "years_used": len(cash_vals)})
+
+    if cagr >= 0.05:
+        score = 100.0
+    elif cagr >= 0.0:
+        score = 65.0
+    else:
+        score = 20.0
+
+    return (score, {"cagr_pct": round(cagr * 100, 2), "years_used": len(cash_vals)})
+
+
 def score_dividend_yield(div_yield: float | None) -> tuple[float, dict]:
     """
     配当利回り適正スコアを計算（0〜100点）。
@@ -431,8 +601,11 @@ def calc_ryogakucho_scores(
     s3, b3 = score_financial_health(results)
     s4, b4 = score_business_growth(results)
     s5, b5 = score_dividend_yield(div_yield)
+    s6, b6 = score_operating_margin(results)
+    s7, b7 = score_operating_cf(results)
+    s8, b8 = score_cash(results)
 
-    total = round((s1 + s2 + s3 + s4 + s5) / 5, 1)
+    total = round((s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8) / 8, 1)
 
     return {
         "ticker": ticker,
@@ -441,6 +614,9 @@ def calc_ryogakucho_scores(
         "financial_health": round(s3, 1),
         "business_growth": round(s4, 1),
         "dividend_yield_score": round(s5, 1),
+        "operating_margin_score": round(s6, 1),
+        "operating_cf_score": round(s7, 1),
+        "cash_score": round(s8, 1),
         "total": total,
         "breakdown": {
             "dividend_continuity": b1,
@@ -448,6 +624,9 @@ def calc_ryogakucho_scores(
             "financial_health": b3,
             "business_growth": b4,
             "dividend_yield": b5,
+            "operating_margin": b6,
+            "operating_cf": b7,
+            "cash": b8,
         },
     }
 
@@ -476,6 +655,7 @@ def calc_all_ryogakucho_scores(
     if not rows:
         return pd.DataFrame(columns=[
             "ticker", "dividend_continuity", "payout_ratio_score",
-            "financial_health", "business_growth", "dividend_yield_score", "total",
+            "financial_health", "business_growth", "dividend_yield_score",
+            "operating_margin_score", "operating_cf_score", "cash_score", "total",
         ])
     return pd.DataFrame(rows)

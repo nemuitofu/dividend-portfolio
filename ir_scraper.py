@@ -69,12 +69,13 @@ _COL_KEYWORDS: list[tuple[list[str], str]] = [
     (["ROE"],                                                                "roe"),
     (["ROA"],                                                                "roa"),
     (["営業CF", "営業キャッシュ"],                                           "operating_cf"),
+    (["現金等", "現金及び現金等価物", "現預金", "現金・預金"],               "cash"),
 ]
 
 _RESULT_FIELDS = [
     "revenue", "operating_profit", "ordinary_profit",
     "net_income", "eps", "dps", "payout_ratio",
-    "equity_ratio", "roe", "roa", "operating_cf",
+    "equity_ratio", "roe", "roa", "operating_cf", "cash",
 ]
 
 

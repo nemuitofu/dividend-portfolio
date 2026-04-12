@@ -954,7 +954,8 @@ with tab6:
     with st.expander("📐 両学長スコア計算式（クリックで展開）", expanded=False):
         st.markdown("""
         > **評価軸**: 配当継続性 / 配当性向適正 / 財務健全性 / 業績成長性 / 配当利回り適正
-        > の5軸（各0〜100点）の単純平均を総合スコアとします。
+        > / 営業利益率 / 営業CF / 現金等 の8軸（各0〜100点）の単純平均を総合スコアとします。
+        > ※ 両学長の「優良高配当株を見分ける重要な8項目」に完全準拠。
         """)
         for formula_text in FORMULAS.values():
             st.markdown(formula_text)
@@ -975,15 +976,19 @@ with tab6:
             rg_score_cols = [
                 "dividend_continuity", "payout_ratio_score",
                 "financial_health", "business_growth", "dividend_yield_score",
+                "operating_margin_score", "operating_cf_score", "cash_score",
             ]
-            rg_label_jp = ["配当継続性", "配当性向適正", "財務健全性", "業績成長性", "配当利回り"]
+            rg_label_jp = [
+                "配当継続性", "配当性向適正", "財務健全性", "業績成長性", "配当利回り",
+                "営業利益率", "営業CF", "現金等",
+            ]
 
             st.divider()
 
             # ---- ポートフォリオ平均レーダー ---- #
             st.subheader("ポートフォリオ平均スコア（両学長基準）")
             rg_port_scores = rg_scores_df[rg_score_cols].mean().tolist()
-            rg_total_port = round(sum(rg_port_scores) / 5, 1)
+            rg_total_port = round(sum(rg_port_scores) / 8, 1)
 
             fig_rg_port = go.Figure()
             fig_rg_port.add_trace(go.Scatterpolar(
@@ -1068,6 +1073,9 @@ with tab6:
                 bd_fin  = sel_bd["financial_health"]
                 bd_grow = sel_bd["business_growth"]
                 bd_yld  = sel_bd["dividend_yield"]
+                bd_opm  = sel_bd["operating_margin"]
+                bd_ocf  = sel_bd["operating_cf"]
+                bd_cash = sel_bd["cash"]
 
                 st.markdown("**スコア内訳**")
                 st.markdown(f"""
@@ -1087,6 +1095,16 @@ with tab6:
 
 - 配当利回り: **{sel_row_rg['dividend_yield_score']:.0f}点**
   現在 {bd_yld.get('div_yield_pct', 'N/A')}%
+
+- 営業利益率: **{sel_row_rg['operating_margin_score']:.0f}点**
+  直近3年平均 {bd_opm.get('avg_margin_pct', 'N/A')}%（{bd_opm.get('years_used', 0)}年分）
+
+- 営業CF: **{sel_row_rg['operating_cf_score']:.0f}点**
+  黒字率 {bd_ocf.get('positive_rate_pct', 'N/A')}%（{bd_ocf.get('years_used', 0)}年分）
+  CAGR {bd_ocf.get('cagr_pct', 'N/A')}%
+
+- 現金等: **{sel_row_rg['cash_score']:.0f}点**
+  CAGR {bd_cash.get('cagr_pct', 'N/A')}%（{bd_cash.get('years_used', 0)}年分）
 """)
 
             # ---- 歴史的推移チャート ---- #
@@ -1198,9 +1216,13 @@ with tab6:
             disp_rg.columns = [
                 "コード", "銘柄名", "総合",
                 "配当継続性", "配当性向", "財務健全性", "業績成長性", "配当利回り",
+                "営業利益率", "営業CF", "現金等",
             ]
 
-            rg_disp_score_cols = ["総合", "配当継続性", "配当性向", "財務健全性", "業績成長性", "配当利回り"]
+            rg_disp_score_cols = [
+                "総合", "配当継続性", "配当性向", "財務健全性", "業績成長性", "配当利回り",
+                "営業利益率", "営業CF", "現金等",
+            ]
             styled_rg = disp_rg.style.map(
                 _color_score, subset=rg_disp_score_cols
             ).format(
