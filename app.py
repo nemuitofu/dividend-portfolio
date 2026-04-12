@@ -173,6 +173,16 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🗂 生データ",
 ])
 
+def _color_score(val):
+    if pd.isna(val):
+        return ""
+    if val >= 70:
+        return "background-color: #d5f5e3; color: #1e8449"
+    if val >= 50:
+        return "background-color: #fef9e7; color: #7d6608"
+    return "background-color: #fadbd8; color: #922b21"
+
+
 # ========== Tab1: サマリー ========== #
 with tab1:
     _M = "¥ — — —" if mask else None  # マスク時の表示文字列
@@ -800,15 +810,6 @@ with tab6:
                 "コード", "銘柄名", "総合",
                 "安全性", "成長性", "収益性", "株主還元", "割安性",
             ]
-
-            def _color_score(val):
-                if pd.isna(val):
-                    return ""
-                if val >= 70:
-                    return "background-color: #d5f5e3; color: #1e8449"
-                if val >= 50:
-                    return "background-color: #fef9e7; color: #7d6608"
-                return "background-color: #fadbd8; color: #922b21"
 
             score_display_cols = ["総合", "安全性", "成長性", "収益性", "株主還元", "割安性"]
             styled_scores = display_scores.style.map(
